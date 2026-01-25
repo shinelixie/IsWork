@@ -3,7 +3,7 @@
 评估环境： eval
 
 启动vllm
-```bash
+```shell
 VLLM_USE_MODELSCOPE=True CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
   --model /data/xzh/models/qwen3_2b_tea_agent/v1-20260123-173409/checkpoint-1854 \
   --port 8000 \
@@ -11,18 +11,44 @@ VLLM_USE_MODELSCOPE=True CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.opena
   --max_model_len 32768 \
   --served-model-name qwen3_2b_tea_agent
 ```
+使用evalscope的VLMEvalKit后端配置，开始训练，使用siliconflow api进行评测模型输出结果
+
+export CUDA_VISIBLE_DEVICES=0
+export HF_ENDPOINT=https://hf-mirror.com 
+uv run python eval_math_vista_with_vlmevalkit_backend.py
+
+eval_math_vista_with_vlmevalkit_backend.py
+```python
+task_cfg_dict = TaskConfig(
+    work_dir='outputs',
+    eval_backend='VLMEvalKit',
+    eval_config={
+        "reuse": False,
+        'data': ['MathVista_MINI'],
+        # 'limit': 20,
+        'mode': 'all',
+        'model': [ 
+            {'api_base': 'http://localhost:8000/v1/chat/completions',
+            'key': 'EMPTY',
+            'name': 'CustomAPIModel',
+            'temperature': 0.0,
+            'type': 'qwen3_2b_tea_agent',
+            'img_size': -1,
+            'video_llm': False,
+            'max_tokens': 30000,}
+            ],
+        'nproc': 2,
+        'judge': 'exact_matching',
+        'OPENAI_API_KEY' : "",
+        'OPENAI_API_BASE' : "https://api.siliconflow.cn/v1/chat/completions",
+        'LOCAL_LLM' : 'deepseek-ai/DeepSeek-V3.2',
+        },
+
+)
+```
 
 使用evalscope的VLMEvalKit后端配置，从已有/中断的评测结果继续评测
-```
-from evalscope import TaskConfig
-import os
-os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
-os.environ['LOCAL_RANK'] = '0'
-os.environ['WORLD_SIZE'] = '1'
-# 强制让某些依赖库不要乱猜并行策略
-from evalscope import TaskConfig
-from evalscope.constants import  JudgeStrategy
-
+```python
 task_cfg_dict = TaskConfig(
     work_dir='outputs',
     use_cache="outputs/20260124_213449",
@@ -50,29 +76,12 @@ task_cfg_dict = TaskConfig(
         },
 
 )
-
-from evalscope.run import run_task
-from evalscope.summarizer import Summarizer
-
-def run_eval():
-    # 选项 1: python 字典
-    task_cfg = task_cfg_dict
-
-    # 选项 2: yaml 配置文件
-    # task_cfg = 'eval_openai_api.yaml'
-
-    run_task(task_cfg=task_cfg)
-
-    print('>> Start to get the report with summarizer ...')
-    report_list = Summarizer.get_report_from_cfg(task_cfg)
-    print(f'\n>> The report list: {report_list}')
-
-run_eval()
 ```
 
 
+
 训练环境： global: uv envirment
-2026/1/21: datasets num_rows: 7659
+```python
 pip packages:
 Using Python 3.12.12 environment at: global
 Package                       Version     Editable project location
@@ -391,3 +400,4 @@ zipp                          3.23.0
 zlib-state                    0.1.10
 zss                           1.2.0
 zstandard                     0.25.0
+```
