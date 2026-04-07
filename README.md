@@ -160,6 +160,7 @@ swift eval \
 
 ### ascend 
 Ascend HDK = 25.2.3
+
 uv venv vllm-ascend-env --python 3.11
 下载 NNAL 8.5.0 (昇腾社区版链接)
 
@@ -169,8 +170,6 @@ wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-ea
 执行安装
 ```
 chmod +x Ascend-cann-nnal_8.5.0_linux-aarch64.run
-```
-```
 ./Ascend-cann-nnal_8.5.0_linux-aarch64.run --install --quiet
 ```
 
@@ -178,6 +177,13 @@ chmod +x Ascend-cann-nnal_8.5.0_linux-aarch64.run
 添加下面两个行到末尾
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
+
+```
+# 1. 先安装核心 NPU 环境
+uv pip install torch==2.8.0 torch-npu==2.8.0 "numpy<2.0.0"
+# 2. 再根据你的备份文件强行还原其他依赖，跳过版本检查
+uv pip install -r requirements_ascend.txt --no-deps
+```
 
 [requirements_ascend](https://github.com/shinelixie/IsWork/blob/main/requirements_ascend.txt) 是python所需要安装的包
 
