@@ -161,11 +161,18 @@ swift eval \
 ### ascend 
 Ascend HDK = 25.2.3
 uv venv vllm-ascend-env --python 3.11
-# 下载 NNAL 8.5.0 (昇腾社区版链接)
+下载 NNAL 8.5.0 (昇腾社区版链接)
+
+```
 wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-nnal_8.5.0_linux-aarch64.run
+```
 执行安装
-`chmod +x Ascend-cann-nnal_8.5.0_linux-aarch64.run`
-`./Ascend-cann-nnal_8.5.0_linux-aarch64.run --install --quiet`
+```
+chmod +x Ascend-cann-nnal_8.5.0_linux-aarch64.run
+```
+```
+./Ascend-cann-nnal_8.5.0_linux-aarch64.run --install --quiet
+```
 
 ~/.bashrc
 添加下面两个行到末尾
@@ -202,4 +209,30 @@ for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}\nResponse: {generated_text!r}\n")
+```
+在线推理
+```bash
+# 1. 硬件环境变量
+export ASCEND_RT_VISIBLE_DEVICES=0  # 0.6B模型单卡0即可，1TB内存完全溢出
+export TASK_QUEUE_ENABLE=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
+
+# 2. 路径变量 (确保 uv 环境优先)
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+
+# 3. 启动服务
+# 注意：删除了 --quantization ascend (因为0.6B通常非量化)
+# 注意：调整了 TP 为 1
+uv run vllm serve /root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B \
+  --served-model-name qwen3-0.6b \
+  --trust-remote-code \
+  --async-scheduling \
+  --tensor-parallel-size 1 \
+  --max-model-len 32768 \
+  --max-num-batched-tokens 40960 \
+  --compilation-config '{"cudagraph_mode": "PIECEWISE"}' \
+  --port 8113 \
+  --gpu-memory-utilization 0.8
 ```
