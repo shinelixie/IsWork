@@ -157,3 +157,49 @@ swift eval \
         }
     }'
 ```
+
+### ascend 
+Ascend HDK = 25.2.3
+uv venv vllm-ascend-env --python 3.11
+# 下载 NNAL 8.5.0 (昇腾社区版链接)
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.5.0/Ascend-cann-nnal_8.5.0_linux-aarch64.run
+执行安装
+`chmod +x Ascend-cann-nnal_8.5.0_linux-aarch64.run`
+`./Ascend-cann-nnal_8.5.0_linux-aarch64.run --install --quiet`
+
+~/.bashrc
+添加下面两个行到末尾
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+
+[requirements_ascend](https://github.com/shinelixie/IsWork/blob/main/requirements_ascend.txt) 是python所需要安装的包
+
+测试代码
+```python
+from vllm import LLM, SamplingParams
+
+# 设置模型路径 (指向你刚才下载成功的目录)
+model_path = "/root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B"
+
+# 定义测试提示词
+prompts = [
+    "你好，请介绍一下你自己。",
+    "The future of AI on Ascend NPU is",
+]
+
+# 设置采样参数
+sampling_params = SamplingParams(temperature=0.7, top_p=0.9, max_tokens=100)
+
+# 初始化 LLM 引擎 (注意：vllm-ascend 会自动识别 NPU)
+# 如果是多卡 A2/A3，可以加上 tensor_parallel_size=8
+llm = LLM(model=model_path, trust_remote_code=True)
+
+# 生成输出
+outputs = llm.generate(prompts, sampling_params)
+
+# 打印结果
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}\nResponse: {generated_text!r}\n")
+```
