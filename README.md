@@ -176,6 +176,7 @@ chmod +x Ascend-cann-nnal_8.5.0_linux-aarch64.run
 ~/.bashrc
 添加下面两个行到末尾
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
 source /usr/local/Ascend/nnal/atb/set_env.sh
 
 ```
@@ -241,4 +242,117 @@ uv run vllm serve /root/.cache/modelscope/hub/models/Qwen/Qwen3-0.6B \
   --compilation-config '{"cudagraph_mode": "PIECEWISE"}' \
   --port 8113 \
   --gpu-memory-utilization 0.8
+```
+#### qwen3.5
+
+先使用安装[requirements_ascend_qwen35](https://github.com/shinelixie/IsWork/blob/main/requirements_ascend_qwen35.txt)里的包,然后使用下面进行安装,注意下面是使用uv进行安装的,原生的pip要将uv去掉
+
+```
+# 升级 vllm
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+git checkout a75a5b54c7f76bc2e15d3025d6
+git fetch origin pull/34521/head:pr-34521
+git merge pr-34521
+VLLM_TARGET_DEVICE=empty uv pip install -v .
+
+# 升级 vllm-ascend
+uv pip uninstall vllm-ascend -y
+git clone https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+git checkout c63b7a11888e9e1caeeff8
+git fetch origin pull/6742/head:pr-6742
+git merge pr-6742
+uv pip install -v .
+
+# 重新安装 transformers
+git clone https://github.com/huggingface/transformers.git
+cd transformers
+git reset --hard fc9137225880a9d03f130634c20f9dbe36a7b8bf
+uv pip install .
+```
+
+压力测试脚本
+```bash
+#!/bin/bash
+# 加载必要的环境变量
+export LD_PRELOAD="/usr/local/Ascend/cann-8.5.0/aarch64-linux/lib64/libjemalloc.so:$LD_PRELOAD"
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+export HCCL_OP_EXPANSION_MODE="AIV"
+export VLLM_USE_V1=0
+
+MODEL_PATH="/root/.cache/modelscope/hub/models/Qwen/Qwen3.5-35B-A3B"
+
+# 使用 throughput 模式，并将参数名对齐
+vllm bench throughput \
+    --model "$MODEL_PATH" \
+    --tensor-parallel-size 4 \
+    --num-prompts 100 \
+    --input-len 200 \
+    --output-len 200 \
+    --trust-remote-code \
+    --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true, "moe_allreduce_overlap_mode": 1}'
+```
+
+服务启动脚本
+```
+#!/bin/bash
+
+# ==========================================================
+# 1. 基础环境配置 (编译器与库路径)
+# ==========================================================
+export CC=gcc-11
+export CXX=g++-11
+
+# 加载 jemalloc 以优化内存分配效率 (针对 CANN 8.5.0)
+export LD_PRELOAD="/usr/local/Ascend/cann-8.5.0/aarch64-linux/lib64/libjemalloc.so:$LD_PRELOAD"
+
+# ==========================================================
+# 2. 昇腾 NPU 推理专项优化参数
+# ==========================================================
+# 强制使用成熟的 V0 引擎 (避免 V1 引擎在 Triton 算子上的兼容性问题)
+export VLLM_USE_V1=0
+
+# 开启 AIV (AI Vector) 引擎深度优化
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+
+# 开启任务队列和内存分段，减少显存碎片
+export TASK_QUEUE_ENABLE=1
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+
+# 离线模式，避免启动时由于联网校验导致的卡顿
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
+# ==========================================================
+# 3. 模型路径定义
+# ==========================================================
+MODEL_PATH="/root/.cache/modelscope/hub/models/Qwen/Qwen3.5-35B-A3B"
+
+# ==========================================================
+# 4. 启动 vLLM API 服务
+# ==========================================================
+# 注意：已去除 --enforce-eager 以启用图模式 (Graph Mode) 提速
+vllm serve "$MODEL_PATH" \
+    --served-model-name "qwen3.5" \
+    --host 0.0.0.0 \
+    --port 8010 \
+    --tensor-parallel-size 4 \
+    --max-model-len 65536 \
+    --max-num-batched-tokens 8192 \
+    --max-num-seqs 64 \
+    --gpu-memory-utilization 0.95 \
+    --enforce-eager \
+    --trust-remote-code \
+    --async-scheduling \
+    --allowed-local-media-path / \
+    --mm-processor-cache-gb 0 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_xml \
+    --additional-config '{
+        "enable_cpu_binding": true, 
+        "multistream_overlap_shared_expert": true, 
+        "moe_allreduce_overlap_mode": 1
+    }'
 ```
