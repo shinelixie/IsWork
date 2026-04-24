@@ -356,3 +356,25 @@ vllm serve "$MODEL_PATH" \
         "moe_allreduce_overlap_mode": 1
     }'
 ```
+#### qwen3.6
+先使用安装[requirements_qwen36](https://github.com/shinelixie/IsWork/blob/main/requirements_qwen36.txt)里的包,然后使用下面进行安装,注意下面是使用pip进行安装的,要使用uv,增加uv
+
+# 升级 vllm
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+git checkout bcf2be96120005e9aea171927f85055a6a5c0cf6
+VLLM_TARGET_DEVICE=empty pip install -v .
+
+# 升级 vllm-ascend
+pip uninstall vllm-ascend -y
+git clone https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+git checkout 99e1ea0fe685e93f53ee5adfe4b41cdd42fb809f
+pip install -v .
+
+# 重新安装 transformers
+git clone https://github.com/huggingface/transformers.git
+cd transformers
+git reset --hard fc9137225880a9d03f130634c20f9dbe36a7b8bf
+pip install .
+
