@@ -1,0 +1,65 @@
+vLLM rope 参数类型 bug 修复补丁
+================================
+
+问题
+----
+vLLM 0.18.0 的 vllm/transformers_utils/configs/qwen3_5.py 和 qwen3_5_moe.py
+把 ignore_keys_at_rope_validation 写成了 list，而 transformers 5.2.0.dev0
+按 set 使用它：
+
+    # transformers/modeling_rope_utils.py:651
+    ignore_keys_at_rope_validation = ignore_keys_at_rope_validation | {"partial_rotary_factor"}
+    # TypeError: unsupported operand type(s) for |: 'list' and 'set'
+
+transformers 自己的模型（qwen3_vl / qwen2_vl）全部用 set 传这个参数，
+因此是 vLLM 侧的类型写错了（[ 应为 {）。
+
+影响
+----
+加载 Qwen3.5 / Qwen3.6（qwen3_5 / qwen3_5_moe 架构）时，
+vLLM 在 create_model_config 阶段直接抛 TypeError，服务无法启动。
+
+适用范围
+--------
+vllm 0.18.0 @ commit bcf2be96120005e9aea171927f85055a6a5c0cf6
+
+应用方法
+--------
+    cd /path/to/vllm
+    patch -p1 < rope-fix.patch
+
+注意：vllm 若以非 editable 方式安装（代码被复制进 site-packages），
+      除源码树外还需同步修改 site-packages 下的同名文件，
+      或修改后重新执行 uv pip install --no-deps .
+
+
+--- a/vllm/transformers_utils/configs/qwen3_5.py
++++ b/vllm/transformers_utils/configs/qwen3_5.py
+@@ -68,10 +68,10 @@
+         eos_token_id=None,
+         **kwargs,
+     ):
+-        kwargs["ignore_keys_at_rope_validation"] = [
++        kwargs["ignore_keys_at_rope_validation"] = {
+             "mrope_section",
+             "mrope_interleaved",
+-        ]
++        }
+         self.vocab_size = vocab_size
+         self.max_position_embeddings = max_position_embeddings
+         self.hidden_size = hidden_size
+--- a/vllm/transformers_utils/configs/qwen3_5_moe.py
++++ b/vllm/transformers_utils/configs/qwen3_5_moe.py
+@@ -75,10 +75,10 @@
+         eos_token_id=None,
+         **kwargs,
+     ):
+-        kwargs["ignore_keys_at_rope_validation"] = [
++        kwargs["ignore_keys_at_rope_validation"] = {
+             "mrope_section",
+             "mrope_interleaved",
+-        ]
++        }
+         self.vocab_size = vocab_size
+         self.max_position_embeddings = max_position_embeddings
+         self.hidden_size = hidden_size

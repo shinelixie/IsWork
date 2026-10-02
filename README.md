@@ -301,8 +301,10 @@ vllm bench throughput \
 # ==========================================================
 # 1. 基础环境配置 (编译器与库路径)
 # ==========================================================
-export CC=gcc-11
-export CXX=g++-11
+# Ubuntu 20.04 源里最高只有 gcc-10（gcc-11 不存在）；
+# gcc 9.4（系统默认）缺 <span> 等 C++20 头文件，会让 arctic-inference 等包编译失败
+export CC=gcc-10
+export CXX=g++-10
 
 # 加载 jemalloc 以优化内存分配效率 (针对 CANN 8.5.0)
 export LD_PRELOAD="/usr/local/Ascend/cann-8.5.0/aarch64-linux/lib64/libjemalloc.so:$LD_PRELOAD"
@@ -357,24 +359,243 @@ vllm serve "$MODEL_PATH" \
     }'
 ```
 #### qwen3.6
-先使用安装[requirements_qwen36](https://github.com/shinelixie/IsWork/blob/main/requirements_qwen36.txt)里的包,然后使用下面进行安装,注意下面是使用pip进行安装的,要使用uv,增加uv
 
-# 升级 vllm
+> **环境基线**：Ascend HDK 25.2.3 / CANN 8.5.0（宿主机提供，容器内不可升级）
+> **已验证**：910B4 × 7，vLLM 0.18.0 + vllm-ascend 0.18.0rc1 + Qwen3.6-35B-A3B-w8a8（TP=4），
+> 实测 `finish_reason=stop`，KV cache 47.05 GiB，模型加载约 4.5 分钟。
+
+##### 0. 版本配套对照
+
+官方 vLLM Ascend 兼容矩阵里 `v0.18.0` 一行要求如下（注意 CANN 写的是 8.5.1，本项目只能用宿主机的 8.5.0）：
+
+| 组件 | 官方要求 | 本项目实际 | 备注 |
+|---|---|---|---|
+| CANN | 8.5.1 | **8.5.0** | 容器内无法升级，实测可用 |
+| torch | 2.9.0 | 2.9.0 | ✓ |
+| torch_npu | 2.9.0.post1+gitXXXX | **2.9.0.post1+gitee7ba04** | **按 Python 版本+架构分变体**，见下表 |
+| triton-ascend | 3.2.0.dev20260322 | 3.2.0.dev20260322 | 从华为 OBS 装，不是 PyPI 的 3.2.0 |
+| 上游 triton | **必须卸载** | 已卸载 | 否则 `TORCH_LIBRARY` 命名空间冲突 |
+
+**关键**：`torch_npu` 预发布版的 wheel 名**随 Python 版本和 CPU 架构变化**，不能照抄矩阵里的 `+git4c901a4`（那是 cp310 的）。完整映射来自 vllm-ascend v0.18.0 的 `Dockerfile`：
+
+| Python | 架构 | wheel 后缀 |
+|---|---|---|
+| cp310 | aarch64 | `torch_npu-2.9.0.post1+gitec...` → `+git4c901a4` |
+| **cp311** | **aarch64** | **`+gitee7ba04`** ← 本项目使用 |
+| cp310 | x86_64 | `+gita74051c` |
+| cp311 | x86_64 | `+gitdc51c2d` |
+
+下载地址（华为 OBS，实测可直连）：
+```
+https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/<wheel 文件名>
+```
+
+##### 1. 编译器准备（必需）
+
+```bash
+# Ubuntu 20.04 源里最高只有 gcc-10（gcc-11 不存在！）
+# gcc 9.4（系统默认）缺 <span> 等 C++20 头文件，会导致 arctic-inference 编译失败：
+#   fatal error: span: No such file or directory
+apt-get install -y gcc-10 g++-10
+export CC=gcc-10
+export CXX=g++-10
+```
+
+验证：
+```bash
+echo '#include <span>
+int main(){return 0;}' > /tmp/t.cc && g++-10 -std=c++20 /tmp/t.cc -o /tmp/t && echo OK
+```
+
+##### 2. 基础依赖
+
+```bash
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
+
+uv venv vllm-ascend-env --python 3.11
+source vllm-ascend-env/bin/activate
+
+# --index-strategy unsafe-best-match 必须加：torch-npu 正式版只在 PyPI，
+# 而华为云源排前面且只有 dev 版，默认的 first-index 策略会找不到
+uv pip install --no-deps --index-strategy unsafe-best-match \
+  -r requirements_qwen36.txt \
+  --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+```
+
+> `requirements_qwen36.txt` 见 [requirements_qwen36](https://github.com/shinelixie/IsWork/blob/main/requirements_qwen36.txt)，
+> 会把 torch 升到 2.9.0 / torch-npu 2.9.0 / numpy 2.2.6 / triton-ascend 3.2.0。
+
+##### 3. 安装 vllm
+
+```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 git checkout bcf2be96120005e9aea171927f85055a6a5c0cf6
-VLLM_TARGET_DEVICE=empty pip install -v .
+VLLM_TARGET_DEVICE=empty uv pip install --no-deps -v .
+```
 
-# 升级 vllm-ascend
-pip uninstall vllm-ascend -y
+> ⚠️ **不要加 `--no-build-isolation`**。vllm 的 `pyproject.toml` 用 PEP 639 新 license 写法，
+> 需要 `setuptools>=77`；而 `requirements_qwen36.txt` 锁的是 69.5.1，加了会报：
+> `ValueError: invalid pyproject.toml config: 'project.license'`
+
+> `VLLM_TARGET_DEVICE=empty` 构建出的是**纯 Python wheel**（没有 `vllm/_C*.so`），
+> 这是 vllm-ascend 的标准配合方式，**属正常现象**，不是安装失败。
+
+##### 4. 安装 vllm-ascend（需要编译，约 8 分钟）
+
+```bash
 git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 git checkout 99e1ea0fe685e93f53ee5adfe4b41cdd42fb809f
-pip install -v .
 
-# 重新安装 transformers
+export ASCEND_HOME_PATH=/usr/local/Ascend/cann-8.5.0   # set_env.sh 已设置
+export MAX_JOBS=48
+uv pip install --no-deps -v .
+```
+
+编译会产出约 30 个 `.so`，包括 `vllm_ascend_C.cpython-311-aarch64-linux-gnu.so` 和
+`_cann_ops_custom/vendors/vllm-ascend/` 下的 CANN 自定义算子。验证：
+
+```bash
+python -c "import vllm_ascend; print('OK')"
+```
+
+##### 5. 换装官方预发布 torch_npu / triton-ascend，并卸载上游 triton
+
+这一步是照搬 vllm-ascend v0.18.0 的 Dockerfile，**顺序不能改**：
+
+```bash
+OBS="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend"
+
+# (1) 卸载上游 triton —— 否则与 triton-ascend 注册同一个 triton 命名空间
+uv pip uninstall triton
+
+# (2) triton-ascend 换 dev 版
+uv pip install --no-deps "$OBS/triton_ascend-3.2.0.dev20260322-cp311-cp311-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl"
+
+# (3) torch_npu 换官方预发布版
+uv pip install --no-deps "$OBS/torch_npu-2.9.0.post1%2Bgitee7ba04-cp311-cp311-manylinux_2_28_aarch64.whl"
+```
+
+> 第 (1) 步不加会报：`RuntimeError: Only a single TORCH_LIBRARY can be used to register the namespace triton`
+
+##### 6. 从源码安装 transformers
+
+```bash
 git clone https://github.com/huggingface/transformers.git
 cd transformers
 git reset --hard fc9137225880a9d03f130634c20f9dbe36a7b8bf
-pip install .
+
+# 注意：这一步必须带依赖！transformers 5.2.0.dev0 要求 huggingface-hub>=1.3.0,<2.0
+uv pip install .
+```
+
+> 若用 `--no-deps` 装会报：`ImportError: cannot import name 'is_offline_mode' from 'huggingface_hub'`
+> （env 里是给 transformers 4.57.6 用的 huggingface-hub 0.36.2，需要升到 1.33.0）
+
+##### 7. ⚠️ 修复 vLLM 的 rope 参数类型 bug（关键，否则模型起不来）
+
+**这是本项目踩到的最深的坑**：vLLM 把 `ignore_keys_at_rope_validation` 写成了 **list**，
+而 transformers 按 **set** 使用，`list | set` 直接抛 TypeError：
+
+```
+File "transformers/modeling_rope_utils.py", line 651, in convert_rope_params_to_dict
+    ignore_keys_at_rope_validation = ignore_keys_at_rope_validation | {"partial_rotary_factor"}
+TypeError: unsupported operand type(s) for |: 'list' and 'set'
+```
+
+transformers 自己的模型（`qwen3_vl`、`qwen2_vl`）**全部用 set**，所以是 vLLM 侧写错了。
+**两个文件都有这个 bug**，都要改：
+
+| 文件 | 行号 |
+|---|---|
+| `vllm/transformers_utils/configs/qwen3_5.py` | ~71 |
+| `vllm/transformers_utils/configs/qwen3_5_moe.py` | ~78 |
+
+```bash
+cd /data/xzh/vllm
+patch -p1 < rope-fix.patch        # 补丁见本仓库 rope-fix.patch
+```
+
+补丁内容（`[` → `{`、`]` → `}`）：
+```diff
+-        kwargs["ignore_keys_at_rope_validation"] = [
++        kwargs["ignore_keys_at_rope_validation"] = {
+             "mrope_section",
+             "mrope_interleaved",
+-        ]
++        }
+```
+
+> **注意**：vllm 是**非 editable** 安装（代码被复制进 `site-packages`），
+> 所以除了改源码树，**还要同步修改** `site-packages/vllm/transformers_utils/configs/` 下的同名文件。
+> 或者改完源码树后重新 `uv pip install --no-deps .`。
+
+##### 8. 启动服务
+
+`ascend_llm.bash` 见上面 qwen3.5 的服务启动脚本，qwen3.6 只需改 `MODEL_PATH` 和 `--served-model-name`：
+
+```bash
+export CC=gcc-10
+export CXX=g++-10
+export LD_PRELOAD="/usr/local/Ascend/cann-8.5.0/aarch64-linux/lib64/libjemalloc.so:$LD_PRELOAD"
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_BUFFSIZE=1024
+export TASK_QUEUE_ENABLE=1
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+# 注意：VLLM_USE_V1 在 vllm 0.18.0 已废弃，会告警 "Unknown vLLM environment variable"，可删
+
+MODEL_PATH="/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+
+vllm serve "$MODEL_PATH" \
+    --served-model-name "qwen3.6" \
+    --host 0.0.0.0 --port 8010 \
+    --tensor-parallel-size 4 \
+    --max-model-len 65536 \
+    --max-num-batched-tokens 8192 \
+    --max-num-seqs 64 \
+    --gpu-memory-utilization 0.95 \
+    --enforce-eager \
+    --trust-remote-code \
+    --async-scheduling \
+    --allowed-local-media-path / \
+    --mm-processor-cache-gb 0 \
+    --enable-auto-tool-choice \
+    --tool-call-parser qwen3_xml \
+    --additional-config '{
+        "enable_cpu_binding": true,
+        "multistream_overlap_shared_expert": true,
+        "moe_allreduce_overlap_mode": 1
+    }'
+```
+
+**调用验证**（容器内 8010 端口默认未映射到宿主机，需 SSH 隧道：
+
+```bash
+ssh -p 8080 -L 8010:127.0.0.1:8010 root@<宿主机IP>
+# 然后本地访问 http://127.0.0.1:8010/v1
+```
+
+```bash
+curl -s http://127.0.0.1:8010/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3.6","messages":[{"role":"user","content":"你好"}],"max_tokens":100}'
+```
+
+##### 踩坑速查表
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| `fatal error: span: No such file or directory` | gcc 9.4 缺 C++20 头文件 | 装 **gcc-10**（`gcc-11` 在 20.04 不存在），设 `CC/CXX` |
+| 明明设了 `CC=gcc-10`，编译仍用 `/usr/bin/c++` | **uv 缓存里残留旧 `CMakeCache.txt`**，记录了上次的编译器 | `rm -rf /root/.cache/uv/sdists-v9/pypi/<包名>/` |
+| `invalid pyproject.toml config: 'project.license'` | 加了 `--no-build-isolation`，用了 env 里的 setuptools 69.5.1 | **去掉** `--no-build-isolation` |
+| `No module named 'vllm._C'` | `VLLM_TARGET_DEVICE=empty` 本就是纯 Python 构建 | **正常，无需处理** |
+| `Only a single TORCH_LIBRARY ... namespace triton` | 上游 triton 与 triton-ascend 冲突 | `uv pip uninstall triton` |
+| `TypeError: unsupported operand type(s) for \|: 'list' and 'set'` | **vLLM 的 bug**（见步骤 7） | 打 `rope-fix.patch` |
+| `cannot import name 'is_offline_mode' from 'huggingface_hub'` | transformers 装时用了 `--no-deps` | 去掉 `--no-deps`，让 hub 升到 1.33.0 |
+| `no version of torch-npu==2.9.0 ... first index` | uv 默认只认第一个含该包的索引 | 加 `--index-strategy unsafe-best-match` |
+| 端口 8010 从外部连不上 | 容器未发布该端口（只发布了 8080/ttyd） | 用 SSH 隧道，或在 `docker run` 时 `-p` |
 
