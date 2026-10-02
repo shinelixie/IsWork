@@ -362,7 +362,71 @@ vllm serve "$MODEL_PATH" \
 
 > **环境基线**：Ascend HDK 25.2.3 / CANN 8.5.0（宿主机提供，容器内不可升级）
 > **已验证**：910B4 × 7，vLLM 0.18.0 + vllm-ascend 0.18.0rc1 + Qwen3.6-35B-A3B-w8a8（TP=4），
-> 实测 `finish_reason=stop`，KV cache 47.05 GiB，模型加载约 4.5 分钟。
+> 实测 `finish_reason=stop`
+
+##### 环境信息（实测）
+
+> 完整依赖清单（221 个包，含源码 / OBS 安装来源）见
+> [uv_vllm_ascend_qwen36_pip_freeze.txt](https://github.com/shinelixie/IsWork/blob/main/uv_vllm_ascend_qwen36_pip_freeze.txt)
+
+**硬件**
+
+| 项 | 值 |
+|---|---|
+| NPU | **7 × Ascend 910B4-1**（`npu-smi` 可见 1–7，**没有 NPU 0**） |
+| 单卡 HBM | 64 GiB（实测满载 61.9 GiB / 65.5 GiB） |
+| CPU / 内存 | 192 核 / 1.0 TiB（可用 584 GiB） |
+| 数据盘 | `/data` 798 G，可用 189 G |
+
+**系统**
+
+| 项 | 值 |
+|---|---|
+| OS | Ubuntu 20.04.6 LTS |
+| 架构 | aarch64 |
+| 内核 | 5.15.0-25-generic（容器共享宿主内核） |
+| **glibc** | **2.31** ← 偏低，是若干预编译轮子装不上的根因 |
+| 编译器 | 系统默认 gcc 9.4.0；**额外装 gcc-10 / g++-10 (10.5.0)** |
+| 系统 cmake | 3.16.3（构建实际用 venv 内的 4.3.1） |
+
+**昇腾软件栈（宿主机透传，容器内不可改）**
+
+| 层 | 版本 |
+|---|---|
+| **HDK（驱动 + 固件）** | **25.2.3** |
+| └ 驱动内部版本 | `V100R001C21SPC010B220`（ascendhal 7.35.23） |
+| └ 固件 | `7.7.0.10.220` |
+| **CANN Toolkit + Ops** | **8.5.0**（`/usr/local/Ascend/cann-8.5.0`） |
+| **NNAL** | **8.5.0.B160**（atb / asdsip） |
+
+**Python 侧（本项目安装，全部位于 `/data`）**
+
+| 项 | 值 |
+|---|---|
+| 解释器 | Python 3.11.16（uv 管理） |
+| 虚拟环境 | `/data/xzh/vllm-ascend-env` |
+| uv | 0.12.21 |
+| 源码树 | `vllm` / `vllm-ascend` / `transformers` 均在 `/data/xzh/` 下 |
+
+**模型**
+
+| 项 | 值 |
+|---|---|
+| 路径 | `/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-35B-A3B-w8a8` |
+| 实际目录 | `.../Eco-Tech/Qwen3___6-35B-A3B-w8a8`（前者是指向它的符号链接，`___` 才是真实目录名） |
+| 体积 / 分片 | 38 GB / 10 个 `quant_model_weights-*.safetensors` |
+| `model_type` | `qwen3_5_moe` |
+| `architectures` | `Qwen3_5MoeForConditionalGeneration` |
+
+**实测运行指标（TP=4）**
+
+| 项 | 值 |
+|---|---|
+| 模型加载 | 约 270 秒（10 分片，约 7.6 s/片） |
+| KV cache | 47.05 GiB |
+| 引擎初始化 | 44.99 秒 |
+| 每卡 HBM | 61.9 GiB / 65.5 GiB（`--gpu-memory-utilization 0.95`） |
+| 生成吞吐 | 约 2.5 tokens/s（单请求 100 tokens 输出） |
 
 ##### 0. 版本配套对照
 
