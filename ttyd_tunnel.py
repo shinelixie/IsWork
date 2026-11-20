@@ -34,6 +34,11 @@ DEFAULT_ORIGIN = "http://210.38.241.24:11026"
 HDR = struct.Struct("!BII")
 MAX_FRAME = 16384
 CHUNK = 8192
+TUNNEL_WAIT = 45.0
+
+
+class TunnelDown(Exception):
+    pass
 
 O, D, C, E, R = (ord(x) for x in "ODCER")
 
@@ -362,6 +367,8 @@ class Controller:
         self.agent_raw = None
         self.reader_task = None
         self.servers = []
+        self.up = False
+        self.last_error = None
         self.forward_rules = args.forward or []
         self.reverse_rules = args.reverse or []
 
@@ -374,10 +381,17 @@ class Controller:
 
     async def send_frame(self, t, cid, payload=b""):
         frame = HDR.pack(t, cid, len(payload)) + payload
+        ws = self.ws
+        if ws is None or not self.up:
+            raise TunnelDown("tunnel is down")
         async with self.send_lock:
-            await self.ws.send(b"0" + frame)
+            await ws.send(b"0" + frame)
 
     async def connect_and_start_agent(self):
+        self.inbuf.clear()
+        self.ready.clear()
+        self.agent_raw = None
+        self.up = False
         nonce = os.urandom(6).hex()
         self.ws = await websockets.connect(
             self.args.ws, subprotocols=["tty"], origin=self.args.origin,
@@ -402,8 +416,11 @@ class Controller:
             ],
             "allow_hosts": ["127.0.0.1", "localhost", "::1"],
         }
-        tmp_b64 = "/tmp/.ttyd_agent.b64"
-        tmp_py = "/tmp/.ttyd_agent.py"
+        # Unique names per attempt: several tunnels share /tmp inside the ttyd
+        # container (and may reconnect at the same time), so a fixed path races
+        # between "rm -f / write" of one instance and "exec" of another.
+        tmp_b64 = "/tmp/.ttyd_agent_%s.b64" % nonce
+        tmp_py = "/tmp/.ttyd_agent_%s.py" % nonce
         src = AGENT_SRC.replace("__CFG__", repr(cfg))
         # The agent removes its own temporary files as soon as it starts.
         src = ("import os\n"
@@ -440,6 +457,7 @@ class Controller:
         # The agent's R frame may arrive after the marker, so the reader must
         # be running before we wait for it.
         self.reader_task = asyncio.create_task(self.ws_reader())
+        self.up = True
         try:
             await asyncio.wait_for(self.ready.wait(), timeout=20)
         except asyncio.TimeoutError:
@@ -561,8 +579,10 @@ class Controller:
                 if not data:
                     break
                 await self.send_frame(D, conn.cid, data)
-        except (asyncio.CancelledError, ConnectionError):
+        except asyncio.CancelledError:
             raise
+        except ConnectionError:
+            pass
         except Exception as exc:
             log("local read cid=%d: %s" % (conn.cid, exc))
         finally:
@@ -582,8 +602,10 @@ class Controller:
                     break
                 conn.writer.write(item)
                 await conn.writer.drain()
-        except (asyncio.CancelledError, ConnectionError):
+        except asyncio.CancelledError:
             raise
+        except ConnectionError:
+            pass
         except Exception as exc:
             log("local write cid=%d: %s" % (conn.cid, exc))
         finally:
@@ -596,6 +618,13 @@ class Controller:
                 self.teardown(conn)
 
     async def forward_accept(self, reader, writer, target):
+        # Hold the local socket while the tunnel is being re-established.
+        try:
+            await asyncio.wait_for(self.ready.wait(), timeout=TUNNEL_WAIT)
+        except asyncio.TimeoutError:
+            log("tunnel not ready after %ds, dropping local connection" % TUNNEL_WAIT)
+            writer.close()
+            return
         cid = self.alloc_cid()
         conn = LocalConn(cid, reader, writer)
         self.conns[cid] = conn
@@ -605,39 +634,92 @@ class Controller:
         except Exception as exc:
             log("forward open failed: %s" % exc)
             self.teardown(conn)
+            writer.close()
             return
         conn.tasks.append(asyncio.create_task(self.pump_local(conn)))
         conn.tasks.append(asyncio.create_task(self.drain_conn(conn)))
 
     async def ws_reader(self):
-        async for msg in self.ws:
-            raw = msg.encode() if isinstance(msg, str) else msg
-            if raw[:1] == b"0":
-                self.inbuf += raw[1:]
-                self.parse()
-            elif raw[:1] == b"1":
-                log("remote title: %s" % raw[1:].decode("utf-8", "replace"))
+        ws = self.ws
+        try:
+            async for msg in ws:
+                raw = msg.encode() if isinstance(msg, str) else msg
+                if raw[:1] == b"0":
+                    self.inbuf += raw[1:]
+                    self.parse()
+                elif raw[:1] == b"1":
+                    log("remote title: %s" % raw[1:].decode("utf-8", "replace"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.last_error = exc
+            log("websocket dropped: %r rcvd=%r sent=%r" % (
+                exc, getattr(exc, "rcvd", None), getattr(exc, "sent", None)))
+        finally:
+            self.up = False
+            self.ready.clear()
+
+    async def close_ws(self):
+        ws, self.ws = self.ws, None
+        self.up = False
+        self.ready.clear()
+        if ws is not None:
+            try:
+                await asyncio.wait_for(ws.close(), timeout=3)
+            except Exception:
+                pass
+
+    def drop_all_conns(self):
+        for conn in list(self.conns.values()):
+            try:
+                self.teardown(conn)
+            except Exception:
+                pass
+        self.conns.clear()
+
+    def log_rules(self):
+        for (bind, target) in self.forward_rules:
+            log("forward %s:%d -> remote %s:%d" % (bind[0], bind[1], target[0], target[1]))
+        for (bind, target) in self.reverse_rules:
+            log("reverse remote %s:%d -> local %s:%d" % (bind[0], bind[1], target[0], target[1]))
 
     async def run(self):
-        log("connecting %s" % self.args.ws)
-        await self.connect_and_start_agent()
-        reader_task = self.reader_task
         for (bind, target) in self.forward_rules:
             srv = await asyncio.start_server(
                 lambda r, w, t=target: self.forward_accept(r, w, t),
                 bind[0], bind[1], reuse_address=True)
             self.servers.append(srv)
-            log("forward %s:%d -> remote %s:%d" % (bind[0], bind[1], target[0], target[1]))
-        for (bind, target) in self.reverse_rules:
-            log("reverse remote %s:%d -> local %s:%d" % (bind[0], bind[1], target[0], target[1]))
-        log("running")
-        done, pending = await asyncio.wait(
-            {reader_task}, return_when=asyncio.FIRST_COMPLETED)
-        for t in pending:
-            t.cancel()
-        for srv in self.servers:
-            srv.close()
+        self.log_rules()
 
+        backoff = 1.0
+        while True:
+            log("connecting %s" % self.args.ws)
+            try:
+                await self.connect_and_start_agent()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log("connect failed: %s: %s" % (type(exc).__name__, exc))
+                await self.close_ws()
+                log("retrying in %.0fs" % backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+                continue
+
+            log("running (local listeners stay bound across reconnects)")
+            backoff = 1.0
+            try:
+                await self.reader_task
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self.last_error = exc
+                log("tunnel died: %s: %s" % (type(exc).__name__, exc))
+            log("tunnel lost, dropping %d connection(s)" % len(self.conns))
+            self.drop_all_conns()
+            await self.close_ws()
+            await asyncio.sleep(1.0)
+            self.log_rules()
 
 def main():
     ap = argparse.ArgumentParser(description="TCP-over-ttyd tunnel (forward + reverse)")
